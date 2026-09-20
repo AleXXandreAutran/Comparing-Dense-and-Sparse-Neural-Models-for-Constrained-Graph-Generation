@@ -12,12 +12,14 @@ All generated outputs satisfied their requested connectivity, edge-budget and de
 
 At 512 nodes, using one CPU thread, four generation steps and batch size one:
 
-| Measurement                    |  Dense | Sparse |
-| ------------------------------ | -----: | -----: |
-| Complete generation, median ms |  88.22 | 288.89 |
-| Sampled process RSS, MiB       | 443.64 | 274.47 |
+| Measurement | Dense | Sparse |
+|---|---:|---:|
+| Complete generation, median ms | 88.22 | 288.89 |
+| Sampled process RSS, MiB | 443.64 | 274.47 |
 
 Sparse generation used 38.1% less process memory, but was 3.27× slower overall. Candidate scoring alone was 25.4× faster with the same sparse model weights, showing that constraint handling dominates total runtime.
+
+![Runtime, memory and candidate scaling](figures/research/scaling.png)
 
 Sparse models had worse clustering fidelity than dense diffusion, and none of the generators produced planar graphs. Planarity is measured but not enforced. Models were trained at 32 nodes; larger sizes are used only for inference-scaling experiments.
 
