@@ -1,129 +1,99 @@
-# Methods and evaluation
+# Methods
 
-This document describes the research extension in `src/frugal_graphs/`: `research.py`, `sparse_model.py`, `constrained.py` and `research_metrics.py`. The original experiments in `results/legacy/results.json` use a different dataset and protocol. Their scores must not be mixed with the new benchmark.
+This study compares dense and sparse neural models for graph generation. It measures graph quality, constraint satisfaction, runtime and memory use. The `results/legacy/` directory stores earlier experiments with their own protocol.
 
-## Data and split policy
+## Data
 
-The main configuration uses 32 vertices and 64 edges. Each family has 96 training, 24 validation, 32 test and 32 independent reference graphs. The dataset seed is 20260921. The training seeds are 11, 23 and 37. `configs/research.json` is the source of truth; the smoke configuration is only a pipeline check.
+The main dataset contains two graph families, each with 32 nodes and 64 edges:
 
-Two families are generated:
+- Conditioned SBM: four equal-sized communities, with edges six times more likely within a community than between communities before probability clipping. Only connected graphs with exactly 64 edges are kept.
+- Planar graphs: a Delaunay triangulation of random points in the unit square, reduced to a spanning tree and enough extra edges to reach 64. Coordinates are then discarded.
 
-- **Conditioned SBM.** Four balanced blocks, independent Bernoulli edges and a within/between probability ratio of six before clipping. Draws are accepted only when connected and when they contain exactly 64 edges. This is an SBM conditioned on these events, not an unconditioned SBM benchmark.
-- **Thinned Delaunay graphs.** Uniform points in the unit square define a Delaunay triangulation. A spanning tree selected using random edge weights is retained, then random remaining triangulation edges fill the edge budget. The result is connected and planar. This is a custom planar family, not an official benchmark split from a cited paper.
+These are custom synthetic datasets. Each family has 96 training, 24 validation, 32 test and 32 independent reference graphs. Nodes are randomly relabelled. WL hashes flag possible duplicates, followed by exact isomorphism checks to reject repeats within and across splits.
 
-Graphs receive random vertex labels. WL hashes identify possible duplicates, then exact graph isomorphism checks reject duplicates across all four splits. The families therefore share neither labelled copies nor isomorphic copies across splits. Sampling without replacement slightly changes the family distribution. The split manifest records graph counts and hashes. The planar coordinates are discarded: static models learn topology and family labels, without positions.
-
-The test split is the fidelity reference for model comparisons. The independent reference split is also compared against the test split in the reference_sample rows. This finite-sample comparison is not a guaranteed metric floor.
+The dataset seed is 20260921; training uses seeds 11, 23 and 37. Full settings are in [research.json](../configs/research.json). The smoke configuration checks the pipeline.
 
 ## Models and training
 
-The dense reference is the repository's binary-edge diffusion model. It uses a GNN, a symmetric edge head, explicit degree/common-neighbour features and all unordered pairs. Training predicts clean edges from Bernoulli-corrupted graphs with BCE. The cosine-squared retention schedule reaches zero at its terminal step. Sampling uses per-edge reverse probabilities followed by a final connected, budgeted decoder. It is a local implementation, not an execution of DiGress.
+The dense model is a local binary-edge diffusion implementation. It uses a GNN, degree and common-neighbour features, and scores every unordered node pair. Training predicts clean edges from Bernoulli-corrupted graphs with binary cross-entropy (BCE). Sampling uses reverse edge probabilities, then a decoder enforces the graph constraints.
 
-The sparse model passes messages on the current edges and scores only candidate pairs. It uses node degree, relative degree, noise time and family features. Its symmetric edge head uses sums, absolute differences and products of endpoint embeddings. Candidate membership and endpoint degrees remain available when message passing is disabled. The no-message-passing ablation therefore still has structural information. Optional coordinate inputs exist in the API, but are absent from the recorded static training protocol.
+The sparse model passes messages along current edges and scores a smaller set of candidate pairs. Its inputs include degree, relative degree, noise time and graph family. The edge head combines endpoint embeddings symmetrically. Static training uses topology features and family labels.
 
-Sparse training always includes every clean edge and adds random nonedges to its candidate support. Bernoulli corruption acts on that support. BCE predicts clean candidate labels; the prior is the clean-edge fraction within the support. This is a support-conditioned denoising objective, not an unbiased all-pairs likelihood. At generation time the support comes from the current graph and fresh candidates, so there is a training/sampling support mismatch. Feasible edits guided by the network and annealed Gumbel perturbations define the sampler. No exact diffusion posterior or learned sampling distribution with a known density is claimed.
+During sparse training, candidates contain every clean edge plus random nonedges. BCE is computed on this support. At generation time, candidates come from the current graph and fresh proposals. Sampling combines neural scores, Gumbel noise and feasible graph edits.
 
-With hidden width 24 and two message-passing layers, the sparse model has 4,609 trainable parameters and the dense model has 8,737. The main training budgets are 40 sparse epochs and 80 dense epochs, with Adam at 0.001 and batch size 16. Checkpoints minimize validation BCE using fixed validation corruption. These models differ in architecture, parameter count, objective and training budget; the full-generation comparison cannot isolate sparsity alone. The same-weight candidate-scoring experiment below provides a narrower comparison.
+| Setting | Dense | Sparse |
+|---|---:|---:|
+| Hidden width | 24 | 24 |
+| Message-passing layers | 2 | 2 |
+| Trainable parameters | 8,737 | 4,609 |
+| Training epochs | 80 | 40 |
 
-For each method, seed and family, temperature is selected from 0.25, 0.5 and 1 using the mean validation degree, clustering and spectral MMD². The test split is not used for calibration. The one-shot heuristics use temperature one without tuning. Step counts 1, 4 and 8, fixed versus refreshed candidates, all-pairs candidates, rebuilt projection, no message passing and degree cap six provide separate ablations. A degree cap can restrict the target distribution, since the training data were not conditioned on that cap.
+Both use Adam with learning rate 0.001 and batch size 16. Checkpoints are selected by validation BCE with fixed corruption. Temperatures of 0.25, 0.5 and 1 are compared using mean validation degree, clustering and spectral MMD².
 
-Sampling cost is measured during evaluation. The training losses do not include differentiable time or memory penalties. Quantization is optional post-training dynamic int8 quantization of linear layers; backend support, execution status and measurements are recorded. A smaller representation is not assumed to improve speed, peak memory or fidelity.
+Ablations cover 1, 4 and 8 generation steps, fixed or refreshed candidates, all-pairs scoring, rebuilt projection, a degree cap of six, and removal of message passing. The variant without message passing receives degree and candidate-membership information. Training graphs have no degree cap.
 
-## Constraints and their invariant
+The comparison covers two complete generation pipelines, with the architectures and training budgets listed above. Training uses BCE; runtime and memory are measured during evaluation.
 
-The admissible set contains simple, connected graphs with at most `B` edges and, when requested, maximum degree at most `D`. Dynamic graphs additionally require every edge to lie inside the communication radius. Exact edge count is measured separately. Planarity is a fidelity/validity statistic for the planar family, not a hard sampling constraint.
+## Constraints and sparse computation
 
-The sampler starts from a feasible connected seed. It accepts two types of update:
+Generated graphs must be simple, connected and contain at most `B` edges. Optional constraints limit node degree to `D` and restrict edges to a communication radius.
 
-1. Add an edge only when the budget and both endpoint degrees permit it. Connectivity is preserved.
-2. Add a candidate edge `(u, v)` and remove one edge on an existing path from `u` to `v`. The new edge closes a cycle, so removing an old edge on that cycle preserves connectivity. The final degrees must satisfy the cap.
+Starting from a feasible connected graph, the decoder can:
 
-An exchange is one atomic graph transition. Serializing removal and addition as separately observable states would not give the same invariant. By induction from the feasible seed, every committed state remains connected, simple and within the budget and degree cap. Restricting both current edges and candidates to the allowed range graph preserves geometric validity as well.
+1. Add an edge if the budget and endpoint degrees allow it.
+2. Add an edge and remove an existing edge on the resulting cycle, checking the final degrees. This exchange is one atomic update, preserving connectivity.
 
-Accepted exchanges strictly improve the current supplied score sum. Additions prefer filling the budget even when their scores are negative. A degree or range restriction can leave fewer than `B` edges. The decoder is a feasibility heuristic: it does not guarantee the largest attainable edge count, maximum score or minimum number of modifications. The projected ablation rebuilds a score-prioritized feasible spanning tree before completing it, rather than continuing the current graph through admissible edits. It is not a minimum-edit projection or a differentiable constraint operator.
+Every committed state must satisfy the constraints. The greedy decoder adds admissible edges toward the budget. The projected variant rebuilds a feasible spanning tree before adding edges.
 
-Without a range mask, initialization uses a random path. With an explicit allowed set it uses greedy spanning-tree searches, with a bounded number of retries when a degree cap applies. A disconnected allowed graph or an impossible basic edge/degree bound produces `InfeasibleGraphError`. Exhausting the degree-constrained search produces `FeasibilitySearchError`; search failure is not a mathematical proof of infeasibility. Neither case is repaired by violating a constraint.
+Initialization uses a random path without a range mask, or a bounded greedy spanning-tree search with an allowed edge set. Proven basic infeasibility raises `InfeasibleGraphError`; exhausting the search raises `FeasibilitySearchError`.
 
-## Sparsity and complexity
+With `n` nodes, `m` current edges and `k` proposed neighbours per node, the candidate count is at most `m + kn`, capped by the number of possible pairs. The main configuration uses `k=4` and refreshes candidates at each step.
 
-Let `n` be the number of vertices, `m` the current edge count, `k` the candidate neighbours requested per vertex and `c` the candidate count. Current edges remain in the support, with `c <= m + kn` and `c <= n(n-1)/2`. Setting `k >= n-1` explicitly requests every pair. The main sparse configuration uses `k=4` and refreshes candidates at each edit step.
+For fixed model width, sparse denoising storage grows with nodes, edges and candidates. Constraint checks sort candidate scores and search for paths. A geometric mask stores allowed pairs, with quadratic storage for dense range neighbourhoods.
 
-The sparse representation stores edge arrays, node features and adjacency sets. For fixed hidden width, denoising storage grows with `n + m + c`; no dense adjacency or common-neighbour matrix is needed. Candidate canonicalization sorts edge keys. Constraint updates sort candidate scores and may search for a path for each proposed exchange: a conservative bound is `O(c log c + c(n+m))`, plus deterministic neighbour-ordering costs. Sparse storage therefore does not imply linear end-to-end sampling time. Global feasibility work can dominate neural scoring.
+## Baselines and quantization
 
-An explicit geometric mask has its own size `a`. Radius neighbours use a spatial tree, but listing and storing them is output-sensitive and can still require quadratic space when almost all agents are within range. Sparse candidate claims do not remove that cost. Dense eigenvalue calculations and NetworkX statistics belong to evaluation, outside the sampling timers.
+Three local baselines use the same constrained decoder: random Gumbel scores, a degree prior fitted on training graphs, and an SBM-style score model fitted from training communities. The degree and SBM-style priors are fitted before timing.
 
-## Fidelity, validity and robustness
+Optional post-training dynamic INT8 quantization applies to linear layers. Backend support, execution status, storage and performance are recorded separately.
 
-Every method's complete generated batch is evaluated. Invalid samples stay in the denominator. Loops, duplicate undirected edges and invalid endpoints fail simple-graph validity; other statistics use the corresponding simple graph after invalid edges are removed.
+An import interface accepts external samples with provenance metadata: upstream repository and commit, configuration, test-split hash, seeds, hardware, command and timing scope. The main protocol requires 32 samples per family and seed, with 32 nodes per graph. Import validation checks the schema and split identity.
 
-Per-graph histograms use 32 bins: degree divided by `max(n-1,1)` on `[0,1]`, local clustering on `[0,1]`, and normalized-Laplacian eigenvalues on `[0,2]`. Empty graphs use a unit mass at zero by convention and still fail connectivity. RBF biased squared MMD compares the histogram distributions. Each bandwidth is the median positive Euclidean distance among at most the first 512 training histograms, with fallback one for a constant training statistic. Neither generated graphs nor test graphs set bandwidths. Scores from different statistics, families or protocols are not interchangeable.
+## Quality and validity
 
-Additional metrics include Wasserstein and total variation distances between mean histograms; node-, edge- and triangle-count Wasserstein distances; connectivity, simplicity, budget and degree violations; planarity; and WL-based uniqueness and novelty. WL values are proxies, not exact isomorphism certificates. Aggregate `valid_rate` combines simplicity, connectivity, budget, degree and applicable physical range. Planarity remains separate. Family-specific results are also computed for mixed batches.
+Every generated sample is evaluated, including invalid outputs. The main fidelity metrics use 32-bin histograms of normalized degree, clustering and normalized-Laplacian eigenvalues. Biased RBF MMD² compares generated graphs against the test split; lower values indicate closer distributions for the same metric and protocol.
 
-Algebraic connectivity is the second eigenvalue of the **unnormalized** Laplacian. It is zero for disconnected graphs and graphs with fewer than two vertices. Edge-failure resilience independently removes each edge with probability 0.1 in 20 trials per graph. Seeds are 2718 plus the sample index. Reports include connected fraction and largest-component fraction. These empirical topology tests do not establish physical system stability; compare them alongside graph size and edge count.
+Kernel bandwidths use the median positive distance between training histograms, using at most 512 graphs, with a fallback of one. Test and generated graphs never set them. The independent reference split is also compared with the test split to show finite-sample variation.
 
-## Timing and memory
+Other metrics cover histogram and graph-count distances, planarity, validity, and WL-based uniqueness and novelty. Overall validity combines simplicity, connectivity, edge budget, degree and any range constraint. Planarity is reported separately.
 
-Quality rows obtain their metric batch from the memory pass of `profile_operation(..., return_result=True)`. The same deterministic generation operation is used for the timing pass. Quality profiling uses one timing repetition and no warmup, so its latency is descriptive, not a stable microbenchmark. It also occurs within the research process: allocator history and other loaded models contribute to process RSS. Per-graph generation times are retained alongside the batch measurement.
+Robustness uses algebraic connectivity, the second eigenvalue of the unnormalized Laplacian, and 20 edge-failure trials per graph. Each edge is removed independently with probability 0.1, using seed 2718 plus the sample index.
 
-Scaling uses a fresh CPU process for each method/size pair, one PyTorch thread, two warmups and seven timed repetitions. It reports median, 25th and 75th percentile latency. Two scopes are kept separate:
+## Runtime and memory
 
-- **Candidate scoring:** identical sparse weights and active graph, with sparse versus all-pairs candidates prepared before timing. This isolates the neural scoring workload.
-- **Complete generation:** initialization, candidate construction, scoring, constraint enforcement and invariant checks. Model loading and metric evaluation remain outside timing.
+Scaling experiments use a fresh CPU process for each method and size, one PyTorch thread, two warmups and seven timed repetitions. Reports give median latency and quartiles. Inference cost is measured at 32, 64, 128, 256 and 512 nodes, using models trained at 32 nodes, four generation steps and checkpoint seed 11.
 
-The scaling sizes are 32, 64, 128, 256 and 512, using four sampling steps and checkpoint seed 11. Weights were trained at 32 vertices. Larger-size measurements test inference cost under size extrapolation; they do not establish fidelity at those sizes or provide variation across training seeds.
+Two measurements are kept separate:
 
-CPU memory is sampled process RSS at 1 ms in a separate pass after timing. Reports retain RSS before warmup, the warmed baseline, sampled peak, peak minus baseline and process-lifetime maximum RSS. Polling may miss brief peaks. Native allocator caches and unrelated process allocations remain included; a zero RSS delta does not mean zero working memory. The lifetime high-water mark includes imports, warmup and earlier allocations, and is not an operation-only peak. Model parameter/storage bytes are separate quantities. Fresh workers improve comparability without eliminating these limitations.
+- Candidate scoring uses identical sparse weights and the same active graph, with sparse or all-pairs candidates prepared before timing.
+- Complete generation includes initialization, candidate construction, neural scoring, constraint handling and invariant checks. Model loading and metric evaluation are excluded.
 
-Available CUDA devices report synchronized timing and allocated/reserved peaks after resetting CUDA peak counters. Unavailable GPU measurements are `null`, not zero. The local CPU experiments support no GPU speed or energy claim. Global Python, NumPy and loaded PyTorch RNGs are reset before each pass; operations using private generators need an explicit reset or a fixed per-call seed. Baseline fitting is performed before timing.
+CPU memory is process RSS sampled every millisecond in a separate pass after timing. It includes Python, PyTorch and allocator caches. Baseline RSS, sampled peak, their difference and process-lifetime maximum are distinct measurements. Weight storage is reported separately.
 
-## Dynamic agents
+Quality runs use one timing repetition without warmup inside the main research process. Metrics use the samples returned by the memory pass. Random generators are reset between profiling passes.
 
-The main case study moves 32 agents for 30 frames, with three motion seeds, budget 64, degree cap six and radius 0.34. Small Gaussian displacements are clipped to the unit square. All methods see the same positions. Rebuild uses distance-based scores; retain first repairs the previous topology; learned-retain adds the static network's scores to hand-designed distance and retention terms. Retained graphs are filled toward the same budget when admissible edges are available. Budget underfilling is still possible under the constraints.
+Unavailable GPU measurements are recorded as `null`.
 
-The learned model was trained on static topology without coordinates. This is a transfer experiment with geometric rules, not a trained motion model or a robotics simulation. No learned minimum-churn or optimal-robustness guarantee is claimed. A disconnected range graph is included as an explicit infeasible case.
+## Moving agents
 
-Churn is the size of the edge-set symmetric difference; normalized churn divides by the union size. Frame zero is excluded from mean transition churn. λ₂, edge-failure resilience, runtime and failed/infeasible frames accompany churn. Mean statistics over feasible frames must be read with the number of failures, rather than treating missing outputs as valid graphs.
+The dynamic experiment moves 32 agents over 30 frames with three motion seeds. All methods see the same positions, with edge budget 64, degree cap six and communication radius 0.34.
 
-## Local and external baselines
+Three approaches are compared: rebuilding from distance scores, repairing and retaining the previous topology, and adding static neural scores to distance and retention rules. This experiment transfers the model trained on static topology to moving agents.
 
-Local one-shot baselines share the constrained decoder:
+Churn counts edges added or removed between frames. Its normalized form divides by the edge-set union; frame zero is excluded from transition averages. Reports also include connectivity, resilience, runtime and failed frames. A disconnected range graph provides an explicit infeasible case.
 
-- `random`: independent Gumbel scores on admissible pairs.
-- `degree_prior`: a training-fitted, sorted degree profile, interpolated to the requested size, shuffled across vertices and converted to Chung–Lu-style edge scores.
-- `fitted_sbm`: greedy-modularity communities from training graphs, pooled smoothed within/between probabilities, and shuffled approximately equal-size blocks.
+## Reproducibility
 
-These are score heuristics followed by a decoder. They are not uniform connected-graph samplers, exact SBM draws or implementations of SPECTRE. Their fitting uses training graphs only and occurs outside timing.
+Runs save configurations, source snapshots, environment details, split hashes, checkpoints, calibration, samples and trajectories. Verification recomputes metrics and checks intermediate graph states. Tests cover constraints, metrics, profiling and imported samples; CI also runs the smoke pipeline.
 
-Official implementations are [DiGress](https://github.com/cvignac/DiGress), [SparseDiff](https://github.com/qym7/SparseDiff), [SPECTRE](https://github.com/KarolisMart/SPECTRE) and [GDSS](https://github.com/harryjo97/GDSS). They have **not been executed as part of the local benchmark**. The repository provides a provenance-checked import path for their exported samples. It does not rename local baselines after these papers.
-
-An external export uses the following JSON structure. The repeated letters are illustrative placeholders: replace them with actual hashes, include the full run configuration, and identify the executed upstream command and hardware. The method belongs inside `metadata`.
-
-```json
-{
-  "metadata": {
-    "method": "DiGress",
-    "upstream_url": "https://github.com/cvignac/DiGress",
-    "repo_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "config": {"dataset": "sbm", "sampling_steps": 500},
-    "split_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "seeds": [11],
-    "timing_scope": "Attached batch generation including correction, excluding evaluation",
-    "hardware": "Actual CPU or GPU, RAM, operating system and thread count",
-    "command": "Actual upstream command"
-  },
-  "samples": [
-    {"n": 3, "edges": [[0, 1], [1, 2]], "family": 0, "seed": 11}
-  ]
-}
-```
-
-The three-node record above illustrates the schema only. For the main benchmark, provide 32-node graphs and exactly 32 samples per family for every declared seed, with a seed field on each record. Use integer family IDs, zero-based undirected edge lists and the exact test split hash from `dataset_manifest.json`. The adapter checks required metadata, full commit/hash formats, requested counts and split identity, and returns the export file's SHA-256. Invalid graph outputs remain available for validity evaluation. Schema validation does not certify that upstream code was run. Timing supplied as extra metadata remains externally reported timing. Export raw and corrected samples separately; include correction cost when comparing corrected methods. Match splits, sample counts, seeds and timing scope before making a performance claim.
-
-## Reproducibility and scope
-
-Saved configurations, sources, environment, split hashes, checkpoints, validation calibration, generated graphs and trajectories identify each run. Verification recomputes metrics from saved samples and checks intermediate feasible states. Tests cover known spectra, permutation-invariant statistics, training-only bandwidths, invalid outputs, RNG reset, profiling cleanup, external provenance, constrained edits and sparse inference. CI also runs the smoke pipeline.
-
-Resume checks all four dataset hashes and counts against the saved manifest before reusing checkpoints or writing files. Full verification requires every expected method/seed/family combination, sample batch and model, including quantized results only when their saved status is `executed`. Packing reruns full verification before writing the bundle. For an unfinished experiment, `verify --partial` writes a separate partial report; it does not allow packing. A resumed run clears its previous completion and verification records until the corresponding stages finish again.
-
-This is a small controlled study with three training seeds and custom synthetic distributions. It does not establish state-of-the-art quality, embedded deployment, measured energy savings, or the benefits of coordinate-conditioned learning. A useful outcome may be a negative one: sparse neural scoring can be cheaper while global constraint handling removes that advantage in complete generation. Interpret the measured tables and their scope rather than assuming a gain from parameter or candidate counts.
+Resume checks all four dataset hashes and counts before reusing checkpoints or writing files. Full verification requires all expected methods, seeds, families, sample batches and models. INT8 results are required only when their saved status is `executed`. Packing reruns full verification. `verify --partial` creates a separate report for unfinished experiments. Resumed runs clear earlier completion and verification records until those stages finish again.
