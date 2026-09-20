@@ -1,0 +1,30 @@
+{
+  "main": {
+    "n": 32, "budget": 64, "dataset_seed": 20260921,
+    "train_per_family": 96, "val_per_family": 24,
+    "test_per_family": 32, "reference_per_family": 32,
+    "seeds": [11, 23, 37], "epochs": 40, "dense_epochs": 80,
+    "batch_size": 16, "learning_rate": 0.001,
+    "hidden": 24, "layers": 2, "k": 4, "diffusion_steps": 32,
+    "sampling_steps": [1, 4, 8], "temperatures": [0.25, 0.5, 1.0],
+    "validation_samples": 8, "threads": 1,
+    "scaling_sizes": [32, 64, 128, 256, 512], "scaling_steps": 4,
+    "profile_repetitions": 7, "profile_warmup": 2,
+    "dynamic_n": 32, "dynamic_frames": 30, "dynamic_radius": 0.34,
+    "dynamic_budget": 64, "dynamic_max_degree": 6, "dynamic_motion": 0.018
+  },
+  "smoke": {
+    "n": 12, "budget": 24, "dataset_seed": 123,
+    "train_per_family": 4, "val_per_family": 3,
+    "test_per_family": 3, "reference_per_family": 3,
+    "seeds": [11], "epochs": 1, "dense_epochs": 1,
+    "batch_size": 4, "learning_rate": 0.001,
+    "hidden": 8, "layers": 1, "k": 2, "diffusion_steps": 4,
+    "sampling_steps": [1, 4], "temperatures": [0.5],
+    "validation_samples": 2, "threads": 1,
+    "scaling_sizes": [12, 24], "scaling_steps": 2,
+    "profile_repetitions": 2, "profile_warmup": 1,
+    "dynamic_n": 12, "dynamic_frames": 4, "dynamic_radius": 0.55,
+    "dynamic_budget": 24, "dynamic_max_degree": 6, "dynamic_motion": 0.01
+  }
+}
