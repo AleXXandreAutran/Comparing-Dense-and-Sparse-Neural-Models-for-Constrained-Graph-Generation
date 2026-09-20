@@ -1,4 +1,4 @@
-# Frugal Constraint-Aware Graph Generation
+# Comparing Dense and Sparse Graph Generation
 
 PyTorch experiments on sparse graph generation with connectivity, edge-budget and optional degree constraints.
 
