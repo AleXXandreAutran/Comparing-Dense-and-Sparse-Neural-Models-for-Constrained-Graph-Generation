@@ -2,24 +2,22 @@
 
 PyTorch experiments on sparse graph generation with connectivity, edge-budget and optional degree constraints.
 
-**Research question:** when does enforcing global constraints outweigh the speed advantage of sparse neural computation?
+Research question: when does enforcing global constraints outweigh the speed advantage of sparse neural computation?
 
 ## Results
 
-The main study trained **9 models across three seeds** and evaluated **2,880 generated graphs** on conditioned SBMs and planar graphs with 32 nodes and 64 edges.
+The main study trained 9 models across three seeds and evaluated 2,880 generated graphs on conditioned SBMs and planar graphs with 32 nodes and 64 edges.
 
 All generated outputs satisfied their requested connectivity, edge-budget and degree constraints.
 
-At **512 nodes**, using one CPU thread, four generation steps and batch size one:
+At 512 nodes, using one CPU thread, four generation steps and batch size one:
 
-| Measurement | Dense | Sparse |
-|---|---:|---:|
-| Complete generation, median ms | 88.22 | 288.89 |
-| Sampled process RSS, MiB | 443.64 | 274.47 |
+| Measurement                    |  Dense | Sparse |
+| ------------------------------ | -----: | -----: |
+| Complete generation, median ms |  88.22 | 288.89 |
+| Sampled process RSS, MiB       | 443.64 | 274.47 |
 
-Sparse generation used **38.1% less process memory**, but was **3.27× slower overall**. Candidate scoring alone was **25.4× faster** with the same sparse model weights, showing that constraint handling dominates total runtime.
-
-![Runtime, memory and candidate scaling](figures/research/scaling.png)
+Sparse generation used 38.1% less process memory, but was 3.27× slower overall. Candidate scoring alone was 25.4× faster with the same sparse model weights, showing that constraint handling dominates total runtime.
 
 Sparse models had worse clustering fidelity than dense diffusion, and none of the generators produced planar graphs. Planarity is measured but not enforced. Models were trained at 32 nodes; larger sizes are used only for inference-scaling experiments.
 
@@ -27,7 +25,7 @@ Sparse models had worse clustering fidelity than dense diffusion, and none of th
 
 ## Quick start
 
-Use **Python 3.12** from the repository root:
+Use Python 3.12 from the repository root:
 
 ```bash
 python -m venv .venv
