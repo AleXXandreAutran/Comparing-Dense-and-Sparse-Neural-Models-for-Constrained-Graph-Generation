@@ -19,7 +19,7 @@ Sparse generation used 38.1% less process memory, but was 3.27× slower overall.
 
 ![Runtime, memory and candidate scaling](figures/research/scaling.png)
 
-Sparse models had worse clustering fidelity than dense diffusion, and none of the generators produced planar graphs. Planarity is measured but not enforced. Models were trained at 32 nodes; larger sizes are used only for inference-scaling experiments.
+Sparse models had worse clustering fidelity than dense diffusion, and none of the generators produced planar graphs. Models were trained at 32 nodes. Larger sizes are used only for inference-scaling experiments.
 
 [Detailed results](docs/RESULTS.md) · [Methods](docs/METHODS.md) · [Quality](figures/research/quality.png) · [Moving agents](figures/research/dynamic.png)
 
