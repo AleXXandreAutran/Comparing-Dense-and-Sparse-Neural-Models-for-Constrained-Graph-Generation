@@ -2,8 +2,6 @@
 
 PyTorch experiments on sparse graph generation with connectivity, edge-budget and optional degree constraints.
 
-Research question: when does enforcing global constraints outweigh the speed advantage of sparse neural computation?
-
 ## Results
 
 The main study trained 9 models across three seeds and evaluated 2,880 generated graphs on conditioned SBMs and planar graphs with 32 nodes and 64 edges.
