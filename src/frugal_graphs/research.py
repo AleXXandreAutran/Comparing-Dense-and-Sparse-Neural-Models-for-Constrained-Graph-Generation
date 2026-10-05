@@ -634,6 +634,180 @@ def evaluate_external(path, output):
     write_json(output / f'external-{method}.json', {'results': rows, 'provenance': imported['metadata']})
 
 
+def quality_report_notes(rows):
+    """Explain the measured results without assuming every run has the same outcome."""
+    generators = [row for row in rows if row['method'] != 'reference_sample']
+    notes = []
+    validity = ''
+    if generators and all(row['valid_rate'] == 1 for row in generators):
+        validity = 'We can see that all generators meet the enforced constraints, with a validity rate of 1.0000. '
+    if generators and all(row['planar_rate'] == 0 for row in generators):
+        validity += 'However, none produces planar graphs, even on the planar dataset. '
+    notes.append(validity + 'Planarity is checked separately, so a graph can be valid without being planar.')
+
+    metrics = ('degree_mmd2', 'clustering_mmd2', 'spectral_mmd2')
+    means = {}
+    for row in rows:
+        key = (row['family'], row['method'])
+        if key not in means:
+            group = [r for r in rows if (r['family'], r['method']) == key]
+            means[key] = {metric: np.mean([r[metric] for r in group]) for metric in metrics}
+    steps = sorted({int(method[len('dense_s'):]) for _, method in means
+                    if method.startswith('dense_s') and method[len('dense_s'):].isdigit()})
+    paired = {family: [step for step in steps if (family, f'dense_s{step}') in means
+                      and (family, f'sparse_s{step}') in means] for family in FAMILIES}
+    if all(paired.values()) and all(
+            means[family, f'sparse_s{step}']['clustering_mmd2'] > means[family, f'dense_s{step}']['clustering_mmd2']
+            for family in FAMILIES for step in paired[family]):
+        notes.append('At the same number of generation steps, the standard sparse variants have higher clustering MMD² '
+                     'than the corresponding dense variants in both graph families.')
+
+    comparisons = []
+    if paired['sbm'] and all(means['sbm', f'dense_s{step}'][metric] < means['sbm', f'sparse_s{step}'][metric]
+                             for step in paired['sbm'] for metric in metrics):
+        compared_steps = ', '.join(map(str, paired['sbm']))
+        comparisons.append(f'For SBM graphs, the dense variants have lower MMD² values than the corresponding sparse variants '
+                           f'at {compared_steps} steps.')
+    degree_wins = [step for step in paired['planar']
+                   if means['planar', f'sparse_s{step}']['degree_mmd2'] < means['planar', f'dense_s{step}']['degree_mmd2']
+                   and all(means['planar', f'sparse_s{step}'][metric] > means['planar', f'dense_s{step}'][metric]
+                           for metric in metrics[1:])]
+    if degree_wins:
+        names = ' and '.join(f'`sparse_s{step}`' for step in degree_wins)
+        verb = 'matches' if len(degree_wins) == 1 else 'match'
+        error_verb = 'has' if len(degree_wins) == 1 else 'have'
+        comparisons.append(f'On planar graphs, {names} {verb} the degree distribution better than the dense counterparts, '
+                           f'but {error_verb} higher clustering and spectral errors. So matching degrees well does not necessarily '
+                           'mean that the other structural properties are reproduced well.')
+    if comparisons:
+        notes.append(' '.join(comparisons))
+
+    common_steps = sorted(set(paired['sbm']) & set(paired['planar']))
+    if len(common_steps) > 1:
+        first, last = common_steps[0], common_steps[-1]
+        dense_improves = all(means[family, f'dense_s{last}'][metric] < means[family, f'dense_s{first}'][metric]
+                             for family in FAMILIES for metric in metrics[1:])
+        sparse_worsens = all(means[family, f'sparse_s{last}'][metric] > means[family, f'sparse_s{first}'][metric]
+                            for family in FAMILIES for metric in metrics)
+        if dense_improves and sparse_worsens:
+            notes.append(f'Increasing the number of steps from {first} to {last} improves the dense model’s clustering and '
+                         'spectral scores in both families. The three sparse scores get worse over the same comparison. '
+                         'More generation steps therefore do not automatically lead to better results in this setting.')
+
+    planar_methods = {method: values for (family, method), values in means.items()
+                      if family == 'planar' and method != 'reference_sample'}
+    if 'fitted_sbm' in planar_methods and all(
+            planar_methods['fitted_sbm'][metric] == min(values[metric] for values in planar_methods.values())
+            for metric in metrics[1:]):
+        notes.append('The `fitted_sbm` baseline also performs well. On planar data, it has the lowest clustering and '
+                     'spectral MMD² among the generators, so the neural models do not improve on the baselines in every metric.')
+    return notes
+
+
+def scaling_report_notes(rows):
+    """Keep timings and memory comparisons in the prose in sync with the table."""
+    measured = {(row['n'], row['method']): row for row in rows if row['status'] == 'executed'}
+    notes = []
+
+    def paired_sizes(left, right):
+        return sorted(n for n, method in measured if method == left and (n, right) in measured)
+
+    score_sizes = paired_sizes('sparse_score', 'dense_candidate_score')
+    score_ratio = None
+    if score_sizes and all(measured[n, method]['latency_ms_median'] > 0
+                           for n in score_sizes for method in ('sparse_score', 'dense_candidate_score')):
+        ratios = [measured[n, 'dense_candidate_score']['latency_ms_median'] /
+                  measured[n, 'sparse_score']['latency_ms_median'] for n in score_sizes]
+        n = score_sizes[-1]
+        sparse, dense = measured[n, 'sparse_score'], measured[n, 'dense_candidate_score']
+        score_ratio = ratios[-1]
+        text = ''
+        if len(ratios) > 1 and all(ratio > 1 for ratio in ratios) and all(right > left for left, right in zip(ratios, ratios[1:])):
+            text = 'We can see that the scoring-time advantage grows with graph size. '
+        text += (f'At {n} nodes, sparse scoring takes {sparse["latency_ms_median"]:.3f} ms compared with '
+                 f'{dense["latency_ms_median"]:.3f} ms for all-pairs candidate scoring.')
+        if score_ratio > 1:
+            text += f' This makes sparse scoring about {score_ratio:.1f} times faster. Scoring fewer candidates helps at this size.'
+        notes.append(text)
+
+    generation_sizes = paired_sizes('sparse_generation', 'dense_generation')
+    if generation_sizes:
+        n = generation_sizes[-1]
+        sparse, dense = measured[n, 'sparse_generation'], measured[n, 'dense_generation']
+        if dense['rss_sampled_peak_bytes'] > 0 and min(sparse['latency_ms_median'], dense['latency_ms_median']) > 0:
+            memory_change = 100 * (sparse['rss_sampled_peak_bytes'] / dense['rss_sampled_peak_bytes'] - 1)
+            time_ratio = sparse['latency_ms_median'] / dense['latency_ms_median']
+            memory_word = 'less' if memory_change <= 0 else 'more'
+            time_word = 'longer' if time_ratio >= 1 else 'faster'
+            factor = time_ratio if time_ratio >= 1 else 1 / time_ratio
+            text = (f'For complete generation, sparse generation uses about {abs(memory_change):.1f}% {memory_word} '
+                    f'process memory at {n} nodes and takes about {factor:.2f} times {time_word}.')
+            if score_sizes and score_sizes[-1] == n and score_ratio is not None and score_ratio > 1 and time_ratio > 1:
+                text += ' So the faster scoring does not translate into faster complete generation in this implementation.'
+            notes.append(text)
+
+    int8_sizes = paired_sizes('sparse_int8', 'sparse_generation')
+    if int8_sizes:
+        faster = [measured[n, 'sparse_int8']['latency_ms_median'] < measured[n, 'sparse_generation']['latency_ms_median']
+                  for n in int8_sizes]
+        if all(faster):
+            text = 'The INT8 variant is faster at every size tested with both variants. '
+        elif any(faster):
+            text = 'The INT8 variant provides no consistent speedup across the tested sizes. '
+        else:
+            text = 'The INT8 variant provides no speedup at the sizes tested with both variants. '
+        n = int8_sizes[-1]
+        text += (f'At {n} nodes, it takes {measured[n, "sparse_int8"]["latency_ms_median"]:.3f} ms compared with '
+                 f'{measured[n, "sparse_generation"]["latency_ms_median"]:.3f} ms for the unquantized sparse generator.')
+        notes.append(text)
+    return notes
+
+
+def dynamic_report_notes(rows):
+    """Interpret successful frames using the same averaging rules as the table."""
+    summaries = {}
+    notes = []
+    for method in ('rebuild', 'retain', 'learned_retain'):
+        attempted = [row for row in rows if row['method'] == method]
+        feasible = [row for row in attempted if row['status'] == 'feasible']
+        after = [row['churn_edges'] for row in feasible if row['frame'] > 0]
+        if feasible:
+            summaries[method] = {'attempted': len(attempted), 'feasible': len(feasible),
+                                 'edges': np.mean([row['edge_count'] for row in feasible]),
+                                 'churn': np.mean(after) if after else None,
+                                 'lambda2': np.mean([row['lambda2'] for row in feasible])}
+    if not summaries:
+        return notes
+    if len(summaries) == 3 and all(group['feasible'] == group['attempted'] for group in summaries.values()):
+        attempts = {group['attempted'] for group in summaries.values()}
+        edges = {f'{group["edges"]:.2f}' for group in summaries.values()}
+        if len(attempts) == len(edges) == 1:
+            notes.append(f'All three strategies succeed in all {attempts.pop()} attempted frames and keep '
+                         f'{float(edges.pop()):g} edges on average.')
+    elif any(group['feasible'] < group['attempted'] for group in summaries.values()):
+        notes.append('Some attempted frames are infeasible. The means in this table describe only the feasible frames.')
+
+    if all(method in summaries and summaries[method]['churn'] is not None for method in ('rebuild', 'retain')):
+        rebuild, retain = summaries['rebuild'], summaries['retain']
+        if retain['churn'] < rebuild['churn']:
+            notes.append(f'We can see that retaining connections reduces mean churn from {rebuild["churn"]:.3f} '
+                         f'to {retain["churn"]:.3f}. Since churn counts added and removed edges, this means '
+                         'the graph changes less between frames.')
+    if len(summaries) == 3:
+        rebuild, retain, learned = (summaries[method] for method in ('rebuild', 'retain', 'learned_retain'))
+        text = ''
+        if all(group['lambda2'] > rebuild['lambda2'] for group in (retain, learned)):
+            text = 'The retention strategies also have a higher mean λ₂, which indicates stronger algebraic connectivity. '
+        if retain['churn'] is not None and learned['churn'] is not None and (
+                f'{retain["churn"]:.3f}' == f'{learned["churn"]:.3f}'
+                and f'{retain["lambda2"]:.4f}' == f'{learned["lambda2"]:.4f}'):
+            text += ('The `retain` and `learned_retain` values are identical at the reported precision, so these averages '
+                     'show no additional benefit from learned scores on churn or λ₂ in this experiment.')
+        if text:
+            notes.append(text.rstrip())
+    return notes
+
+
 def make_report(output):
     import matplotlib
     matplotlib.use('Agg')
@@ -644,7 +818,12 @@ def make_report(output):
     methods = list(dict.fromkeys(row['method'] for row in rows))
     config = json.loads((output / 'config.json').read_text())
     lines = ['# Recorded research experiments', '',
-             f'{config["n"]} nodes, budget {config["budget"]}, seeds {config["seeds"]}. Values below are means across seeds.', '',
+             f'{config["n"]} nodes, budget {config["budget"]}, training seeds {config["seeds"]}. '
+             'Values for the generators are means across these seeds. '
+             'The `reference_sample` rows are evaluated once per graph family on the independent reference set, '
+             f'using dataset seed {config["dataset_seed"]}.', '',
+             'Lower MMD² values mean a closer match to the test distribution for the measured statistic. '
+             'Valid and Planar are rates: 1.0000 means 100%.', '',
              '| Family | Method | Degree MMD² | Clustering MMD² | Spectral MMD² | Valid | Planar |',
              '|---|---|---:|---:|---:|---:|---:|']
     fig, axes = plt.subplots(2, 3, figsize=(15, 9), layout='constrained')
@@ -667,6 +846,8 @@ def make_report(output):
             axis.grid(axis='x', alpha=0.2)
     fig.savefig(output / 'quality.png', dpi=160)
     plt.close(fig)
+    for note in quality_report_notes(rows):
+        lines.extend(['', note])
     if (output / 'scaling.json').exists():
         scaling = json.loads((output / 'scaling.json').read_text())
         fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), layout='constrained')
@@ -690,6 +871,8 @@ def make_report(output):
         for row in scaling:
             if row['status'] == 'executed':
                 lines.append(f'| {row["method"]} | {row["n"]} | {row["latency_ms_median"]:.3f} | {row["rss_sampled_peak_bytes"] / 1024**2:.2f} | {row["rss_peak_delta_bytes"] / 1024**2:.2f} | {row["candidate_count"]} |')
+        for note in scaling_report_notes(scaling):
+            lines.extend(['', note])
     if (output / 'dynamic.json').exists():
         dynamic = json.loads((output / 'dynamic.json').read_text())['rows']
         fig, axes = plt.subplots(1, 3, figsize=(15, 4), layout='constrained')
@@ -709,6 +892,8 @@ def make_report(output):
         axes[0].legend(fontsize=8)
         fig.savefig(output / 'dynamic.png', dpi=160)
         plt.close(fig)
+        for note in dynamic_report_notes(dynamic):
+            lines.extend(['', note])
     (output / 'report.md').write_text('\n'.join(lines) + '\n')
 
 
@@ -716,6 +901,8 @@ def pack_results(folder):
     import shutil
 
     verify_research(folder)
+    # Rebuild the explanations with the tables before publishing the report.
+    make_report(folder)
     index = {'format': 1, 'files': {}, 'arrays': {}, 'sha256': {}, 'packaged_source_sha256': source_hashes()}
     arrays, checkpoints = {}, {}
     for path in sorted(folder.rglob('*')):
