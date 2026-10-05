@@ -2,6 +2,8 @@
 
 32 nodes, budget 64, seeds [11, 23, 37]. Values below are means across seeds.
 
+Lower MMD² values mean a closer match to the test distribution for the measured statistic. Valid and Planar are rates: 1.0000 means 100%.
+
 | Family | Method | Degree MMD² | Clustering MMD² | Spectral MMD² | Valid | Planar |
 |---|---|---:|---:|---:|---:|---:|
 | sbm | random | 0.0244 | 0.2412 | 0.0340 | 1.0000 | 0.0000 |
@@ -37,6 +39,14 @@
 | planar | sparse_int8 | 0.0637 | 1.3753 | 0.2033 | 1.0000 | 0.0000 |
 | planar | reference_sample | 0.0262 | 0.0222 | 0.0213 | 1.0000 | 1.0000 |
 
+We can see that all generators meet the enforced constraints, with a validity rate of 1.0000. However, none produces planar graphs, even on the planar dataset. Planarity is checked separately, so a graph can be valid without being planar.
+
+For SBM graphs, the dense variants have lower MMD² values than the corresponding sparse variants at one, four, and eight steps. On planar graphs, `sparse_s1` and `sparse_s4` match the degree distribution better than their dense counterparts, but have higher clustering and spectral errors. So matching degrees well does not necessarily mean that the other structural properties are reproduced well.
+
+Increasing the number of steps from one to eight improves the dense model’s clustering and spectral scores in both families. The three sparse scores get worse over the same comparison. More generation steps therefore do not automatically lead to better results in this setting.
+
+The `fitted_sbm` baseline also performs well. On planar data, it has the lowest clustering and spectral MMD² among the generators, so the neural models do not improve on the baselines in every metric.
+
 ## Scaling
 
 Each setting runs in a fresh CPU process. Score-only and complete-generation scopes are separate.
@@ -69,6 +79,12 @@ Each setting runs in a fresh CPU process. Score-only and complete-generation sco
 | dense_generation | 512 | 88.221 | 443.64 | 0.03 | 130816 |
 | sparse_int8 | 512 | 311.324 | 275.34 | 0.03 | 3053 |
 
+We can see that the scoring-time gap grows with graph size. At 512 nodes, sparse scoring takes 0.601 ms compared with 15.285 ms for all-pairs candidate scoring, making it about 25.4 times faster. Scoring fewer candidates becomes especially useful as the graphs get larger.
+
+Complete generation shows a different trade-off. At 512 nodes, sparse generation uses about 38.1% less process memory, but takes about 3.27 times longer. So the faster scoring does not translate into faster complete generation in this implementation.
+
+The INT8 variant provides no consistent speedup across the tested sizes. At 512 nodes, it takes 311.324 ms compared with 288.886 ms for the unquantized sparse generator.
+
 ## Moving agents
 
 | Method | Feasible / attempted | Mean edges | Mean churn after frame 0 | Mean λ₂ |
@@ -76,3 +92,7 @@ Each setting runs in a fresh CPU process. Score-only and complete-generation sco
 | rebuild | 90/90 | 64.00 | 13.816 | 0.1465 |
 | retain | 90/90 | 64.00 | 1.678 | 0.2311 |
 | learned_retain | 90/90 | 64.00 | 1.678 | 0.2311 |
+
+All three strategies succeed in all 90 attempted frames and keep 64 edges on average. We can see that retaining connections reduces mean churn from 13.816 to 1.678. Since churn counts added and removed edges, this means the graph changes much less between frames.
+
+The retention strategies also have a higher mean λ₂, which indicates stronger algebraic connectivity. The `retain` and `learned_retain` values are identical at the reported precision, so these averages show no additional benefit from learned scores on churn or λ₂ in this experiment.
