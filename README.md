@@ -29,7 +29,9 @@ Scoring candidate edges on its own was much faster. Using the same sparse model 
 
 ### Graph quality
 
-The sparse models matched the clustering statistics less well than dense diffusion. None of the generators produced planar graphs in the evaluated samples.
+At the same number of generation steps (1, 4, or 8), the standard sparse variants matched the clustering statistics less well than the corresponding dense variants in both graph families. Some comparisons between other variants give different results: on planar graphs, `sparse_projected` has a slightly lower clustering MMD² than `dense_s1` (1.0024 versus 1.0373).
+
+None of the generators produced planar graphs in the evaluated samples.
 
 Planarity was checked separately and was not enforced during generation. A graph could therefore meet the requested connectivity, edge-budget, and degree limits without being planar.
 
