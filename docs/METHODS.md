@@ -85,6 +85,6 @@ We report changes in connections (edge churn), connectivity, resilience, runtime
 
 Each run saves its configuration, a snapshot of the source code, environment details, dataset hashes, checkpoints, generated samples, and trajectories.
 
-Verification recomputes the metrics and checks the graph constraints. Automated tests cover constraints, metrics, profiling, and imported samples. CI runs the smoke pipeline.
+Verification recomputes the metrics and checks the graph constraints. Automated tests cover constraints, metrics, profiling, and imported samples. 
 
 When a run is resumed, dataset hashes and sizes are checked before checkpoints are reused. Full verification requires all expected models, methods, seeds, graph families, and sample batches to be present.
